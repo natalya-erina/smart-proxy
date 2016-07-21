@@ -8,141 +8,126 @@ package com.mycompany.smartproxy;
 import com.mongodb.BasicDBObject;
 import com.mongodb.DBObject;
 import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.io.PrintWriter;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
 import java.net.URL;
 import java.net.UnknownHostException;
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.List;
-import javax.servlet.ServletException;
-import javax.servlet.http.HttpServlet;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import javax.ws.rs.DELETE;
+import javax.ws.rs.GET;
+import javax.ws.rs.POST;
+import javax.ws.rs.PUT;
+import javax.ws.rs.Path;
+import javax.ws.rs.Produces;
+import javax.ws.rs.core.Context;
+import javax.ws.rs.core.HttpHeaders;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response;
+import static org.quartz.JobBuilder.newJob;
+import org.quartz.JobDetail;
+import org.quartz.Scheduler;
+import org.quartz.SchedulerException;
+import org.quartz.SchedulerFactory;
+import static org.quartz.SimpleScheduleBuilder.simpleSchedule;
+import org.quartz.Trigger;
+import static org.quartz.TriggerBuilder.newTrigger;
+import org.quartz.impl.StdSchedulerFactory;
 
 /**
  *
  * @author Наталья
  */
-public class ProxyServer extends HttpServlet {
+@Path("/proxy")
+public class ProxyServer {
 
     private DBController controller;
     
-    public ProxyServer() throws UnknownHostException {
+    public ProxyServer() throws UnknownHostException, SchedulerException {
         controller = new DBController();
     }
     
-    private void updateDatabase() throws UnknownHostException, FileNotFoundException, IOException { 
-        File file = new File("./lastUpdate.txt");
-        BufferedReader reader = new BufferedReader(new FileReader(file));
+    static {     
         try {
-            String str = reader.readLine();
-            Date lastUpdate = (new SimpleDateFormat("MM/dd/yyyy")).parse(str);
-            if (((new Date()).getTime() - lastUpdate.getTime())/(1000*60*60*24) >= 3) {
-                List<ProxyInfo> proxies = HtmlParser.parse("http://foxtools.ru/Proxy");
-                controller.clearCollection();
-                for (ProxyInfo proxy : proxies) {
-                    controller.insert(proxy);
-                }
-                controller.updateCollection();
-                PrintWriter pw = new PrintWriter(file);
-                pw.println(new Date());
-                pw.close();
-            }
-        } catch (ParseException ex) {
+            SchedulerFactory schedFact = new StdSchedulerFactory();
+            Scheduler sched = schedFact.getScheduler();
+            sched.start();
+            
+            JobDetail job = newJob(DBController.class).build();
+            Trigger trigger = newTrigger()
+                    .startNow()
+                    .withSchedule(simpleSchedule()
+                            .withIntervalInHours(24)
+                            .repeatForever())
+                    .build();
+            sched.scheduleJob(job, trigger);
+        } catch (SchedulerException ex) {
         }
     }
     
-    private String getResult(HttpURLConnection connection) {
+    public String getResult(HttpURLConnection connection) {
         String result = "";
         try {
-            BufferedReader br = new BufferedReader(new InputStreamReader((connection.getInputStream())));    
+            BufferedReader br = new BufferedReader(new InputStreamReader(connection.getInputStream()));    
             String output;
             while ((output = br.readLine()) != null) {
                 result +=output;
             }
+            br.close();
+            connection.disconnect();
         } catch (IOException e) {
-            result = "<html><body><h2>Cannot connect to requested proxy server</h2></body></html>";
+            result = "Cannot connect to requested proxy server";
         } 
         return result;
     }
     
-    /**
-     * Processes requests for both HTTP <code>GET</code> and <code>POST</code>
-     * methods.
-     *
-     * @param request servlet request
-     * @param response servlet response
-     * @throws ServletException if a servlet-specific error occurs
-     * @throws IOException if an I/O error occurs
-     */
-    protected void processRequest(HttpServletRequest request, HttpServletResponse response)
-            throws ServletException, IOException {
+    private Response processRequest (HttpHeaders headers, String json, String method) throws IOException {
         controller.initDB("test", "proxies");
-        updateDatabase();
         DBObject doc = new BasicDBObject();
-        String country = request.getParameter("country-value").toLowerCase();
-        if (!country.isEmpty())
-            doc.put("country", country);
-        String type= request.getParameter("type-value").toLowerCase();
-        if (!type.isEmpty())
-            doc.put("type", type);
         
+        doc.put("country", headers.getHeaderString("country"));
         ProxyInfo proxyInfo;
         try {
             proxyInfo = controller.getOneDocumentByQuery(doc);
         } catch (NullPointerException e) {
-            String result = "<html><body><h2>Cannot find requested proxy server</h2></body></html>";
-            request.setAttribute("message", result);
-            request.getRequestDispatcher("response.jsp").forward(request, response);
-            return;
+            return Response.ok().build();
         }
        
         Proxy proxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyInfo.getIp(), proxyInfo.getPort()));
-        URL url = new URL(request.getParameter("url"));
-        HttpURLConnection conn = (HttpURLConnection)url.openConnection(proxy);
-        
-        conn.setRequestMethod(request.getParameter("request-type").toUpperCase());  
-        
-        request.setAttribute("message", getResult(conn));
-        request.getRequestDispatcher("response.jsp").forward(request, response);
+        URL url = new URL(headers.getHeaderString("target"));
+        ConnectionCreator creator = new ConnectionCreator(url, proxy, json);
+        HttpURLConnection conn = creator.getConnection(method);
+        conn.getResponseCode();
+        String result = getResult(conn);
+        return Response.ok(result, MediaType.APPLICATION_JSON).build();
     }
-
-    // <editor-fold defaultstate="collapsed" desc="HttpServlet methods. Click on the + sign on the left to edit the code.">
-    /**
-     * Handles the HTTP <code>GET</code> method.
-     *
-     * @param request servlet request
-     * @param response servlet response
-     * @throws ServletException if a servlet-specific error occurs
-     * @throws IOException if an I/O error occurs
-     */
-    @Override
-    protected void doGet(HttpServletRequest request, HttpServletResponse response)
-            throws ServletException, IOException {
-        processRequest(request, response);
+    
+    @GET
+    @Path("/go")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response processGetRequest(@Context HttpHeaders headers) throws IOException {
+        return processRequest(headers, "", "GET");
     }
-
-    /**
-     * Handles the HTTP <code>POST</code> method.
-     *
-     * @param request servlet request
-     * @param response servlet response
-     * @throws ServletException if a servlet-specific error occurs
-     * @throws IOException if an I/O error occurs
-     */
-    @Override
-    protected void doPost(HttpServletRequest request, HttpServletResponse response)
-            throws ServletException, IOException {
-        processRequest(request, response);
+    
+    @POST
+    @Path("/go")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response processPostRequest(@Context HttpHeaders headers, String json) throws IOException {
+        return processRequest(headers, json, "POST"); 
     }
-
+    
+    @PUT
+    @Path("/go")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response processPutRequest(@Context HttpHeaders headers, String json) throws IOException {
+        return processRequest(headers, json, "PUT"); 
+    }
+    
+    @DELETE
+    @Path("/go")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response processDeleteRequest(@Context HttpHeaders headers, String json) throws IOException {
+        return processRequest(headers, json, "DELETE"); 
+    }
 }

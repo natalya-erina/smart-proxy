@@ -11,12 +11,16 @@ import com.mongodb.DBCollection;
 import com.mongodb.DBCursor;
 import com.mongodb.DBObject;
 import com.mongodb.MongoClient;
+import java.io.IOException;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.List;
 import javax.ejb.Stateless;
 import javax.inject.Inject;
 import javax.faces.bean.ManagedBean;
+import org.quartz.Job;
+import org.quartz.JobExecutionContext;
+import org.quartz.JobExecutionException;
 
 /**
  *
@@ -25,7 +29,8 @@ import javax.faces.bean.ManagedBean;
 
 @Stateless
 @ManagedBean
-public class DBController {
+
+public class DBController implements Job{
     @Inject ProxyInfo info;
     private DBCollection collection;
     
@@ -96,5 +101,20 @@ public class DBController {
             if (!ProxyInfo.fromDBObject(doc).isAvailable())
                 collection.remove(doc);
         }
+    }
+
+    @Override
+    public void execute(JobExecutionContext jec) throws JobExecutionException {
+        List<ProxyInfo> proxies;
+        try {
+            proxies = HtmlParser.parse("http://foxtools.ru/Proxy");
+        } catch (IOException ex) {
+            return;
+        }
+        clearCollection();
+        for (ProxyInfo proxy : proxies) {
+            insert(proxy);
+        }
+        updateCollection();
     }
 }
